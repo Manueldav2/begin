@@ -60,7 +60,8 @@ Flags worth knowing:
   `user.name`, and `recon.sh` falls back to the repo's most active author and says so
   when you have no commits there. That is the normal case in a repo you just cloned.
 - `--exclude 'examples/**,site/**'` — keep vendored trees and docs sites out of the
-  surface count.
+  surface count. Patterns are anchored at both ends, and the number of files removed is
+  printed, because a silent exclusion shows up later as a missing edge.
 - `--root DIR` — scan a different repo.
 
 ## The order of operations — follow it exactly

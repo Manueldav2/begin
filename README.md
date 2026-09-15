@@ -48,7 +48,7 @@ it, and every limit is printed rather than implied.
 
 | Signal | How | Honest limit |
 |---|---|---|
-| Importance | PageRank over the **value**-import graph, damped by file substance | static only — runtime wiring is invisible |
+| Importance | PageRank over the **value**-import graph, damped by size **and direct fan-in** | static only — runtime wiring is invisible |
 | Complexity | decision points per language + indentation depth | a proxy, and labelled as one |
 | Focus | git churn, your commits, merged PRs **with their bodies** | bounded by `--since`; announced when dead |
 | Surfaces | route / page / component / CLI / MCP / worker / public-API detection | heuristic; declare the rest in `.begin/surfaces.txt` |
@@ -133,6 +133,17 @@ Every assertion exists because that bug was real and shipped once. Among them:
   same-named file for a package the repo's own `requirements.txt` declares
 - the resolver-health warning was gated on a JS/Python allowlist, so a Go repo produced
   zero edges, called every file dead, and said nothing
+- fixing a comment-stripper bug introduced its inverse: a quote inside a regex character
+  class (`/["']/`) or a JSX apostrophe shifted string parity, left the next block comment
+  unstripped, and turned a **commented-out import into a real graph edge**
+- an ordinary `pyproject.toml` listing the project's own `packages = [...]` was read as a
+  dependency list, which destroyed 30 real edges *and* silenced the warning about it
+- importance damping multiplied a z-score, which is sign-asymmetric: it promoted
+  unimportant small files and pushed a 3-line hub with fan-in 60 from rank 1 to rank 61
+- `install-hook.sh` matched `*sh`, so it appended bash into csh, tcsh and fish hooks — a
+  broken `pre-push` hook aborts every push
+- `refresh.mjs` parsed stamps inside fenced code blocks, inventing sections and
+  suppressing real unclaimed-file findings (SKILL.md ships such a fenced example)
 - the unclaimed-file check silently self-destructed the first time you followed the
   skill's own update advice
 - the hook discarded its own output, so the living-doc loop was invisible in practice

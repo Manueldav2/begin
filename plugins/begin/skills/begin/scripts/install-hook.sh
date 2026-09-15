@@ -82,10 +82,14 @@ if [ ! -f "$HOOK" ]; then
 else
   # Appending bash into a python/ruby/node hook breaks BOTH that hook and ours.
   SHEBANG="$(head -1 "$HOOK")"
-  case "$SHEBANG" in
-    '#!'*sh|'#!'*bash|'#!'*zsh|'#!'*env\ bash|'#!'*env\ sh|'#!'*env\ zsh) ;;
-    '#!'*)
-      echo "begin: existing $MODE hook is not a shell script:" >&2
+  # Extract the interpreter NAME. A `*sh` glob also matches csh, tcsh and fish,
+  # none of which can run bash — appending to a csh pre-push hook made it exit
+  # non-zero, which aborts every push.
+  INTERP="$(printf '%s' "$SHEBANG" | sed -e 's|^#![[:space:]]*||' -e 's|^[^[:space:]]*/env[[:space:]]\{1,\}||' -e 's|[[:space:]].*$||' -e 's|.*/||')"
+  case "$INTERP" in
+    sh|bash|zsh|ksh|ksh93|dash|ash|mksh|'') ;;
+    *)
+      echo "begin: existing $MODE hook is not a POSIX shell script ($INTERP):" >&2
       echo "begin:   $SHEBANG" >&2
       echo "begin: refusing to append. Call this line from your hook yourself:" >&2
       echo "begin:   node \"$SCRIPTS/refresh.mjs\" --root \"\$(git rev-parse --show-toplevel)\"" >&2

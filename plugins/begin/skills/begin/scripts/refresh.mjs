@@ -45,11 +45,18 @@ if (!fs.existsSync(BEGIN_MD)) {
   process.exit(0);
 }
 
-const doc = fs.readFileSync(BEGIN_MD, 'utf8');
+const rawDoc = fs.readFileSync(BEGIN_MD, 'utf8');
+// Stamps inside fenced code blocks or inline code are DOCUMENTATION, not
+// declarations. Parsing them invented sections, produced fabricated "commit not
+// in this repo" diagnoses, and — worse — added their files= to the claimed set,
+// suppressing real unclaimed-file findings. SKILL.md itself ships a fenced
+// example stamp, so following the skill triggered this.
+const doc = rawDoc.replace(/^```[\s\S]*?^```/gm, '').replace(/`[^`\n]*`/g, '');
 
 // <!-- begin:section id="x" sha="abc1234" files="a.ts,b/**" -->
 const STAMP = /<!--\s*begin:section\s+([^>]*?)-->/g;
-const attr = (s, k) => (s.match(new RegExp(`${k}="([^"]*)"`)) || [])[1] || '';
+// Anchored: an unanchored name matched `grid="3"` as id and `myfiles="x"` as files.
+const attr = (s, k) => (s.match(new RegExp(`(?:^|\\s)${k}="([^"]*)"`)) || [])[1] || '';
 
 const sections = [];
 let m;

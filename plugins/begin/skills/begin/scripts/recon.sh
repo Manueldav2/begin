@@ -110,7 +110,7 @@ if [ -n "$DIRTY" ]; then
   echo "Diffstat vs HEAD:"
   echo
   echo '```'
-  git diff --stat HEAD 2>/dev/null | tail -25
+  git -c core.quotepath=false diff --stat HEAD 2>/dev/null | tail -25
   echo '```'
   echo
 fi
@@ -126,7 +126,7 @@ if [ -n "$AHEAD" ]; then
   echo "Files this branch touches:"
   echo
   echo '```'
-  git diff --name-only "origin/$DEFAULT_BRANCH...HEAD" 2>/dev/null | head -40
+  git -c core.quotepath=false diff --name-only "origin/$DEFAULT_BRANCH...HEAD" 2>/dev/null | head -40
   echo '```'
   echo
 fi
@@ -144,9 +144,13 @@ echo
 echo "## Files you touched most (window: $SINCE)"
 echo
 if [ -n "$AUTHOR" ]; then
-  git log --since="$SINCE" --author="$AUTHOR" --no-merges --name-only --pretty=format: 2>/dev/null \
-    | sed '/^$/d' | sort | uniq -c | sort -rn | head -20 \
-    | awk '{c=$1; $1=""; sub(/^[ \t]+/,""); printf "- `%s` — %s of your commits\n", $0, c}'
+  # -z plus core.quotepath=false: without them a non-ASCII path arrives
+  # octal-escaped and quoted, and an awk field-rebuild collapses runs of spaces,
+  # so recon printed citable-looking paths that do not exist.
+  git -c core.quotepath=false log --since="$SINCE" --author="$AUTHOR" --no-merges \
+      -z --name-only --pretty=format: 2>/dev/null \
+    | tr '\0' '\n' | sed '/^$/d' | sort | uniq -c | sort -rn | head -20 \
+    | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]+(.*)$/- `\2` — \1 of your commits/'
 fi
 echo
 

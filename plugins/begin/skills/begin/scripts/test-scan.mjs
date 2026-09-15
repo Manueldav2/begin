@@ -102,6 +102,12 @@ def go():
 // A declared third-party package must never resolve to a local file of the same
 // name: \`import stripe\` is the SDK, not routes/stripe.py.
 w('requirements.txt', 'stripe>=7.0.0\nrequests\n');
+// Always present, not behind a mutation: a manifest that lists the project's
+// OWN packages is the normal shape of a Python repo, and reading it as a
+// dependency list destroyed 30 real edges while silencing the health warning.
+// (No mutation can prove this one red — with the fix in place the manifest is
+// harmless by construction. It was observed red in review: edges 30 -> 0.)
+w('pyproject.toml', '[project]\nname = "fx"\ndependencies = ["requests"]\n\n[tool.setuptools]\npackages = [\n  "routes",\n  "pkg",\n]\n');
 w('py/routes/stripe.py', `LOCAL = True\n`);
 // The importer must live INSIDE py/routes/ — that directory then becomes an
 // ancestor root, which is exactly how `import stripe` picked up the local
@@ -144,6 +150,25 @@ const DUP = Array.from({ length: 40 }, (_, i) => `export const dup${i} = ${i} &&
 w('packages/a/shared-copy.js', DUP);
 w('packages/b/shared-copy.js', DUP);
 w('packages/c/shared-copy.js', DUP);
+// A quote inside a REGEX CHARACTER CLASS shifted string parity for the rest of
+// the file, so the JSDoc block below was never stripped and its commented-out
+// import became a real edge — dead code reported as live, reached from a real
+// surface. The inverse of the `"a/*b"` bug, introduced by fixing that one.
+w('src/regexquote.ts', `const QUOTE_RE = /["']/g;
+/**
+ * Usage:
+ *   import { ghost } from './ghost.js';
+ */
+export function strip(s) { return s.replace(QUOTE_RE, ''); }
+`);
+w('src/ghost.ts', `export const ghost = 1;\n`);
+// JSX apostrophes are extremely common and hit the same parity bug.
+w('src/apos.tsx', `export function P() {
+  return <p>don't stop</p>;
+}
+/* import { ghost2 } from './ghost2.js'; */
+`);
+w('src/ghost2.ts', `export const ghost2 = 2;\n`);
 // a `/*` inside a STRING must not eat the imports that follow it
 w('src/tricky.ts', `const PATTERN = "a/*b";
 import { b } from "./b.js";
@@ -167,6 +192,9 @@ if (MUTATE === 'pyHashComment') {
   w('py/hashcomment.py', `import nowhere_module\nfrom nowhere import x\n\ndef go():\n    return 1\n`);
 }
 if (MUTATE === 'pyShadow') w('requirements.txt', 'requests\n');
+// A pyproject listing the project's OWN packages must not be read as a
+// dependency list: doing so destroyed real edges AND silenced the warning.
+
 if (MUTATE === 'generated') {
   w('src/app-esbuild.js', 'export const realCode = 1;\nexport function f(a) { return a + 1; }\n');
   w('src/app-rolldown.js', 'export const alsoReal = 2;\nexport function g(b) { return b * 2; }\n');
@@ -245,6 +273,10 @@ check('reach      src/orphan.ts is unreachable from any surface',
   `hops = ${byFile.get('src/orphan.ts')?.hopsFromSurface}`);
 
 // ---- Python
+check('py pkglist a pyproject `packages = [...]` list does not destroy local edges',
+  byFile.get('py/app.py')?.imports.includes('py/routes/leads.py'),
+  'the project\'s own package names must not enter the third-party set');
+
 check('py abs     `from routes import leads` resolves to the package AND the submodules',
   byFile.get('py/app.py')?.imports.includes('py/routes/leads.py') &&
   byFile.get('py/app.py')?.imports.includes('py/routes/users.py'),
@@ -302,6 +334,15 @@ check('gen rolldown a rolldown bundle with ordinary line lengths is detected',
 check('gen dupes    a file checked in 3x byte-identical is treated as a build artifact',
   ['packages/a/shared-copy.js', 'packages/b/shared-copy.js', 'packages/c/shared-copy.js'].every(isDropped),
   'content-hash duplicate detection did not fire');
+
+check('strip regex a quote in /["\']/ does not turn a commented-out import into an edge',
+  !(byFile.get('src/regexquote.ts')?.imports || []).includes('src/ghost.ts') &&
+  (byFile.get('src/ghost.ts')?.fanIn ?? -1) === 0,
+  `regexquote imports = ${JSON.stringify(byFile.get('src/regexquote.ts')?.imports)}, ghost fanIn = ${byFile.get('src/ghost.ts')?.fanIn}`);
+
+check('strip jsx   a JSX apostrophe does not fabricate an edge from a comment',
+  !(byFile.get('src/apos.tsx')?.imports || []).includes('src/ghost2.ts'),
+  `apos imports = ${JSON.stringify(byFile.get('src/apos.tsx')?.imports)}`);
 
 check('strip      `/*` inside a string does not erase the imports after it',
   byFile.get('src/tricky.ts')?.imports.includes('src/b.ts'),

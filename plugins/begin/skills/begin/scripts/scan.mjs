@@ -101,8 +101,12 @@ if (tracked.length === 0) {
   process.exit(2);
 }
 
+// Anchored at BOTH ends (`(/|$)`), and `?` escaped: without the tail anchor
+// `--exclude lib` also removed `library/`, and `--exclude docs` removed
+// `docs-site/`. Silently dropping files produces missing edges and phantom
+// "unreachable" entries, so the count is reported too.
 const excludeRe = EXCLUDE.length
-  ? new RegExp(EXCLUDE.map((g) => '^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*')).join('|'))
+  ? new RegExp(EXCLUDE.map((g) => '^' + g.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*') + '(/|$)').join('|'))
   : null;
 
 const allCode = tracked
@@ -112,6 +116,9 @@ const allCode = tracked
 // Truncation must be shouted, not implied. "20000 scanned (of 20202 tracked)"
 // reads as "the rest aren't code", when in fact every surface in the repo can
 // be in the dropped tail.
+const excludedCount = tracked
+  .filter((f) => !SKIP_DIR.test(f) && CODE_EXT.has(path.extname(f)))
+  .filter((f) => excludeRe && excludeRe.test(f)).length;
 const truncatedCount = Math.max(0, allCode.length - MAX_FILES);
 const files = allCode.slice(0, MAX_FILES);
 
@@ -153,7 +160,11 @@ const GENERATED_MARKERS = [
   /sourceMappingURL=data:application\/json;base64/,
 ];
 const GENERATED_PATH = /(^|\/)(vendor|vendored|polyfills?|third[_-]?party|generated|__generated__|node_modules|bower_components)\//i;
-const BUILD_PATH = /(^|\/)(dist|build|out|public|static|assets|lib|umd|esm|cjs)\/.*\.(js|mjs|cjs|css)$/i;
+// `lib/` is a SOURCE directory in a large share of npm packages, and
+// public//assets/ hold hand-written JS in Rails, Django and Phoenix apps.
+// Classifying by those paths alone deleted 8 of 9 real source files from one
+// package's ranking. Only unambiguous build directories qualify.
+const BUILD_PATH = /(^|\/)(dist|build|out|\.output|umd)\/.*\.(js|mjs|cjs|css)$/i;
 
 function looksGenerated(file, src, lineCount) {
   if (/\.(min|bundle|chunk)\.(js|css)$/i.test(file)) return 'minified';
@@ -189,12 +200,18 @@ function stripComments(src) {
     const ch = src[i];
     if (ch === '"' || ch === "'" || ch === '`') {
       const q = ch;
+      // A ' or " cannot span a line. Without that bound, a quote inside a regex
+      // character class (/["']/) or a JSX apostrophe (<p>don't</p>) shifted
+      // quote parity for the rest of the file, left the next block comment
+      // unstripped, and turned a commented-out `import` into a real edge —
+      // dead code presented as live, with no signal.
+      if (q === '`' && src.indexOf('`', i + 1) === -1) { out += ch; i++; continue; }
       out += ch; i++;
-      while (i < src.length && src[i] !== q) {
+      while (i < src.length && src[i] !== q && (q === '`' || src[i] !== '\n')) {
         if (src[i] === '\\') { out += src[i++] ?? ''; if (i < src.length) out += src[i++]; continue; }
         out += src[i++];
       }
-      if (i < src.length) out += src[i++];
+      if (i < src.length && src[i] === q) out += src[i++];
       continue;
     }
     if (ch === '/' && src[i + 1] === '*') {
@@ -339,14 +356,18 @@ for (const f of files) {
     list.push(rec.file);
     byHash.set(rec.hash, list);
   }
+  const BUNDLE_EXT = new Set(['.js', '.mjs', '.cjs', '.css']);
   for (const [, list] of byHash) {
     if (list.length < 3) continue;
     for (const f of list) {
       const rec = info.get(f);
-      if (rec && !rec.generated) {
-        rec.generated = 'duplicate-artifact';
-        rec.duplicateCount = list.length;
-      }
+      if (!rec) continue;
+      rec.duplicateCount = list.length;
+      // Only DROP duplicated bundles. Hand-written source copied into several
+      // deploy directories (a shared email_sender.py vendored into four worker
+      // dirs) is still this repo's code, and the duplication is itself worth
+      // seeing — so it stays ranked and merely carries the count.
+      if (!rec.generated && BUNDLE_EXT.has(path.extname(f))) rec.generated = 'duplicate-artifact';
     }
   }
 }
@@ -441,7 +462,10 @@ function resolveTo(cand) {
   return null;
 }
 
-const JS_IMPORT = /(?:^|[^\w.])(?:import\s+[\s\S]{0,2000}?from\s*|import\s*|export\s+[\s\S]{0,2000}?from\s*|require\s*\(\s*|import\s*\(\s*)['"]([^'"]+)['"]/g;
+// The `from` must be preceded by a real import/export STATEMENT start, anchored
+// to a line. Without that, the word `from` inside a SQL string
+// (`select id from "users"`) matched and invented `users` as an external package.
+const JS_IMPORT = /(?:^|[^\w.])(?:import\s+[\s\S]{0,2000}?\sfrom\s*|import\s*|export\s+[\s\S]{0,2000}?\sfrom\s*|require\s*\(\s*|import\s*\(\s*)['"]([^'"]+)['"]/g;
 
 // Python, captured properly:
 //   group 1 = leading dots (relative level), 2 = module path, 3 = imported names
@@ -478,7 +502,11 @@ function resolvePyModule(fromFile, level, mod) {
   // routes/stripe.py was producing a fabricated edge to it, because the app runs
   // with sys.path[0] = backend/ and routes/ is never on the path.
   const top = mod.split('.')[0];
-  if (top && (declaredDeps.has(top) || declaredDeps.has(top.toLowerCase().replace(/-/g, '_')) || PY_STDLIB.has(top))) return null;
+  // A directory with __init__.py IS this repo's package; no manifest entry may
+  // override it. (routes/stripe.py is a bare module in a non-root directory,
+  // which is why the shadowing guard still applies there.)
+  const isLocalPkg = top && pyRootsFor(fromFile).some((r) => fileSet.has(path.posix.join(r, top, '__init__.py')));
+  if (!isLocalPkg && top && (declaredDeps.has(top) || declaredDeps.has(top.toLowerCase().replace(/-/g, '_')) || PY_STDLIB.has(top))) return null;
   const rel = mod.replace(/\./g, '/');
   for (const r of pyRootsFor(fromFile)) {
     const hit = resolvePyPath(path.posix.join(r, rel));
@@ -489,8 +517,10 @@ function resolvePyModule(fromFile, level, mod) {
 
 function resolvePyPath(cand) {
   if (!cand) return null;
-  if (fileSet.has(cand + '.py')) return cand + '.py';
+  // Packages before modules: CPython's FileFinder checks for a directory with
+  // __init__.py first, so with both `config/` and `config.py` the package wins.
   if (fileSet.has(path.posix.join(cand, '__init__.py'))) return path.posix.join(cand, '__init__.py');
+  if (fileSet.has(cand + '.py')) return cand + '.py';
   if (fileSet.has(cand) && cand.endsWith('.py')) return cand;
   return null;
 }
@@ -559,12 +589,26 @@ for (const f of tracked) {
     const j = readJsonAt(f);
     if (j) for (const k of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'])
       for (const d of Object.keys(j[k] || {})) declaredDeps.add(d.replace(/^@/, '').split('/')[0]), declaredDeps.add(d);
-  } else if (/^requirements.*\.txt$/.test(base) || base === 'pyproject.toml' || base === 'Pipfile') {
+  } else if (/^requirements.*\.txt$/.test(base) || base === 'pyproject.toml' || base === 'Pipfile' || base === 'setup.cfg') {
     try {
       const txt = fs.readFileSync(path.join(ROOT, f), 'utf8');
-      for (const line of txt.split('\n')) {
-        const m2 = line.match(/^\s*["']?([A-Za-z0-9_.-]+)/);
-        if (m2 && !line.trim().startsWith('#')) declaredDeps.add(m2[1].toLowerCase().replace(/-/g, '_'));
+      // Only DEPENDENCY sections. Reading every line of pyproject.toml swept up
+      // `[tool.setuptools] packages = ["app"]` — the project's OWN package —
+      // into the third-party set, which then destroyed 30 real edges and
+      // silenced the graph-health warning at the same time.
+      const isReqTxt = /^requirements.*\.txt$/.test(base);
+      let inDeps = isReqTxt;
+      for (const raw of txt.split('\n')) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+        if (!isReqTxt) {
+          if (/^\[/.test(line)) { inDeps = /dependencies|packages\.find|requires/i.test(line) && !/tool\.setuptools\]/i.test(line); continue; }
+          if (/^(dependencies|install_requires|requires)\s*=/.test(line)) { inDeps = true; continue; }
+          if (/^[A-Za-z_][\w.-]*\s*=/.test(line) && !/^(dependencies|install_requires|requires)\s*=/.test(line)) { inDeps = false; continue; }
+          if (!inDeps) continue;
+        }
+        const m2 = line.match(/^["']?([A-Za-z0-9_.-]+)/);
+        if (m2) declaredDeps.add(m2[1].toLowerCase().replace(/-/g, '_'));
       }
     } catch { /* unreadable manifest */ }
   }
@@ -808,8 +852,12 @@ try {
   for (const line of txt.split('\n')) {
     const t = line.trim();
     if (!t || t.startsWith('#')) continue;
-    const [p2, k] = t.split(/\s+/);
-    if (p2) declaredSurfaces.set(p2, k || 'declared');
+    // Split on the LAST whitespace run so a path containing spaces survives,
+    // and strip a leading ./ — both used to be discarded without a word, which
+    // silently defeated the documented escape hatch for correcting the scan.
+    const m2 = t.match(/^(.*?)(?:[ \t]+(\S+))?$/);
+    const p2 = (m2?.[1] || '').replace(/^\.\//, '');
+    if (p2) declaredSurfaces.set(p2, m2?.[2] || 'declared');
   }
 } catch { /* optional file */ }
 
@@ -823,7 +871,10 @@ for (const rec of info.values()) {
   }
 }
 // A human's declaration outranks every heuristic.
-for (const [f, k] of declaredSurfaces) if (fileSet.has(f)) surfaces.set(f, k);
+for (const [f, k] of declaredSurfaces) {
+  if (fileSet.has(f)) surfaces.set(f, k);
+  else console.error(`begin: .begin/surfaces.txt declares "${f}", which is not a tracked file — ignored`);
+}
 
 // public API entry points declared in package.json
 const declaredEntries = new Set();
@@ -903,6 +954,23 @@ let commitsInWindow = 0;
 
 // ---------------------------------------------------------------- scoring
 
+// Damping is applied to RAW PageRank before z-scoring, never to the z-score.
+// Multiplying a z-score is sign-asymmetric: it shrinks a NEGATIVE z toward zero,
+// so it promoted unimportant small files while demoting important ones. With a
+// 0.25 floor, a 3-line hub imported by 60 files stays rank 1; without it, that
+// hub fell to rank 61 of 62.
+const substance = (f) => {
+  const loc = info.get(f)?.loc || 0;
+  const size = 0.25 + 0.75 * (loc / (loc + 60));
+  // PageRank concentrates mass on SINKS — a file that imports nothing collects
+  // rank from whatever points at it, however few things those are. The legend
+  // promises "many things depend on it", so require direct corroboration:
+  // fan-in 3 is damped hard, fan-in 138 barely at all. Size alone could not
+  // tell a 5-line hub (fanIn 138) from a 16-line sink (fanIn 3).
+  const fi = fanIn.get(f) || 0;
+  return size * (fi / (fi + 4));
+};
+
 const vals = (m) => files.map((f) => m.get(f) || 0);
 function z(m) {
   const v = vals(m);
@@ -910,25 +978,18 @@ function z(m) {
   const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / (v.length || 1)) || 1;
   return new Map(files.map((f) => [f, ((m.get(f) || 0) - mu) / sd]));
 }
-const zRank = z(rank), zChurn = z(churn), zCx = z(new Map(files.map((f) => [f, (info.get(f)?.complexity || 0) * (1 + (info.get(f)?.maxDepth || 0) / 10)])));
+const zRank = z(new Map(files.map((f) => [f, (rank.get(f) || 0) * substance(f)]))), zChurn = z(churn), zCx = z(new Map(files.map((f) => [f, (info.get(f)?.complexity || 0) * (1 + (info.get(f)?.maxDepth || 0) / 10)])));
 
 const now = Date.now() / 1000;
 
 // A 4-line re-export imported everywhere collects enormous PageRank and teaches
 // a reader nothing. The substance factor damps importance for files with almost
 // no code, so hubs still rank but trivial barrels stop crowding out engines.
-const substance = (f) => {
-  const loc = info.get(f)?.loc || 0;
-  // loc/(loc+60): 5 LOC -> 0.08, 16 -> 0.21, 60 -> 0.5, 400 -> 0.87.
-  // A log curve was too gentle — a 5-line re-export kept 39% of its PageRank and
-  // still landed in the top 10 above the engines.
-  return loc / (loc + 60);
-};
 
 const terms = new Map(files.map((f) => {
   const recency = lastTouch.has(f) ? Math.exp(-(now - lastTouch.get(f)) / (60 * 60 * 24 * 45)) : 0;
   const t = {
-    importance: 1.2 * (zRank.get(f) || 0) * substance(f),
+    importance: 1.2 * (zRank.get(f) || 0),
     churn: 1.0 * (zChurn.get(f) || 0),
     complexity: 0.8 * (zCx.get(f) || 0),
     recency: 0.6 * recency,
@@ -989,7 +1050,7 @@ const record = (f) => {
     // highest score belonged to a 16-line module with fan-in 3, under a legend
     // promising "many things depend on it". The displayed figure is therefore
     // damped by substance, exactly as the score is, and fanIn sits beside it.
-    importance: +((rank.get(f) || 0) * substance(f)).toFixed(6),
+    importance: +((rank.get(f) || 0) * substance(f)).toFixed(6),   // damped, matches the ranking
     importanceRaw: +(rank.get(f) || 0).toFixed(6),
     commits: churn.get(f) || 0,
     yourCommits: myChurn.get(f) || 0,
@@ -1005,6 +1066,9 @@ const record = (f) => {
     lazyImports: info.get(f)?.lazyImports || [],
     generated: info.get(f)?.generated || null,
     partial: info.get(f)?.partial || false,
+    // Duplicated SOURCE stays ranked; the count makes the duplication visible,
+    // because "this file exists byte-identical in four places" is a finding.
+    identicalCopies: info.get(f)?.duplicateCount || 1,
     why: whyRanked(f),
     score: +(score.get(f) || 0).toFixed(3),
   };
@@ -1025,6 +1089,8 @@ const out = {
     testFiles: [...surfaces.values()].filter((k) => k === 'test').length,
     codeFiles: allCode.length,
     notScanned: truncatedCount,
+    excludedByFlag: excludedCount,
+    droppedAsGenerated: [...info.values()].filter((r) => r.generated).length,
     commitsInWindow,
     resolvedSpecifiers: resolvedCount,
     unresolvedSpecifiers: unresolvedCount,
@@ -1106,6 +1172,20 @@ if (unresolvedCount > 20 && unresolvedCount > resolvedCount * 0.15) {
     }
   }
 }
+// Files removed from the ranking must be VISIBLE. Vendored/minified/build
+// detection is a heuristic; silently deleting real source is the failure mode,
+// so the count is always printed and the reasons are in scan.json.
+{
+  const gen = out.counts.droppedAsGenerated;
+  if (gen > 0 || excludedCount > 0) {
+    const bits = [];
+    if (gen > 0) bits.push(`**${gen}** excluded as vendored / minified / build output / duplicate artifacts`);
+    if (excludedCount > 0) bits.push(`**${excludedCount}** removed by \`--exclude\``);
+    md.push(`_${bits.join(' · ')}. Reasons are in \`.begin/scan.json\` under \`unparsed\` — check them if a file you expected is missing._`);
+    md.push('');
+  }
+}
+
 if (warnings.length) {
   md.push('> [!WARNING]');
   for (const w of warnings) md.push(`> - ${w}`);
@@ -1224,6 +1304,11 @@ md.push('');
 md.push(out.topExternals.slice(0, 15).map((e) => `\`${e.pkg}\`×${e.imports}`).join(' · ') || '_none_');
 md.push('');
 
+// Stamp the digest with the JSON's own generatedAt so a reader can tell whether
+// the pair came from the same run — two independent atomic writes can still
+// interleave under the post-commit hook, which races itself by design.
+md.push('');
+md.push(`<!-- begin:scan generatedAt="${out.generatedAt}" head="${head}" -->`);
 atomicWrite(path.join(OUT_DIR, 'scan.md'), md.join('\n'));
 
 if (!flag('json-only')) process.stdout.write(md.join('\n') + '\n');
