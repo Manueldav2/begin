@@ -36,6 +36,8 @@ jobs:
           done
       - name: living document — staleness, hooks, tree cleanliness
         run: bash plugins/begin/skills/begin/scripts/test-living.sh
+      - name: edge cases — unicode paths, worktrees, concurrency, degenerate repos
+        run: bash plugins/begin/skills/begin/scripts/test-edge.sh
       - name: secret redaction
         run: node plugins/begin/skills/begin/scripts/redact.mjs --self-test
       - name: self-scan (the skill must survive being pointed at itself)

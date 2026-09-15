@@ -74,9 +74,16 @@ echo "begin: installed -> $DEST"
 echo
 echo "begin: verifying the install by running its own test suites"
 FAIL=0
-run() { printf '  %s  %s\n' "$($1 >/dev/null 2>&1 && echo 'ok  ' || { FAIL=1; echo 'FAIL'; })" "$2"; }
+# Run the command OUTSIDE a command substitution. Assigning FAIL=1 inside `$( )`
+# sets it in a subshell, so every failure was discarded and the installer
+# reported "ready" with a red suite.
+run() {
+  if $1 >/dev/null 2>&1; then printf '  ok    %s\n' "$2"
+  else printf '  FAIL  %s\n' "$2"; FAIL=1; fi
+}
 run "node $DEST/scripts/test-scan.mjs"        "test-scan.mjs  (import graph, cycles, surfaces)"
 run "bash $DEST/scripts/test-living.sh"       "test-living.sh (staleness, hooks, tree cleanliness)"
+run "bash $DEST/scripts/test-edge.sh"         "test-edge.sh   (unicode, worktrees, concurrency)"
 run "node $DEST/scripts/redact.mjs --self-test" "redact.mjs     (secret scrubbing)"
 
 echo
