@@ -1,0 +1,42 @@
+name: tests
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+      - name: import graph, cycles, surfaces, reachability
+        run: node plugins/begin/skills/begin/scripts/test-scan.mjs
+      - name: assertions must go red when the input is broken
+        run: |
+          set -e
+          for m in alias jsToTs valueCycle typeCycle; do
+            if node plugins/begin/skills/begin/scripts/test-scan.mjs --mutate "$m" >/dev/null 2>&1; then
+              echo "mutation '$m' did NOT fail the suite — that assertion cannot detect its own bug"
+              exit 1
+            fi
+            echo "  ok  mutation '$m' correctly goes red"
+          done
+      - name: living document — staleness, hooks, tree cleanliness
+        run: bash plugins/begin/skills/begin/scripts/test-living.sh
+      - name: secret redaction
+        run: node plugins/begin/skills/begin/scripts/redact.mjs --self-test
+      - name: self-scan (the skill must survive being pointed at itself)
+        run: node plugins/begin/skills/begin/scripts/scan.mjs --top 5

@@ -1,0 +1,8 @@
+{
+  "name": "begin",
+  "version": "1.1.0",
+  "description": "Orient in a codebase from evidence, and keep a living BEGIN.md that stays honest on every push.",
+  "author": {
+    "name": "Manuel David"
+  }
+}
