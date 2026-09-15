@@ -86,7 +86,17 @@ const SKIP_DIR = /(^|\/)(node_modules|dist|build|out|\.next|\.turbo|vendor|__pyc
 
 const tracked = git(['ls-files', '-z']).split('\0').filter(Boolean);
 if (tracked.length === 0) {
-  console.error('begin: not a git repo (or no tracked files) at ' + ROOT);
+  // Three different situations that used to share one misleading message. A
+  // freshly `git init`'d project being told "not a git repo" is the first thing
+  // a new user sees, and it is false.
+  const isRepo = gitRaw(ROOT, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
+  if (!isRepo) {
+    console.error(`begin: ${ROOT} is not a git repository. begin derives churn and focus from git history — run \`git init\` and make a first commit.`);
+  } else if (!gitRaw(ROOT, ['rev-parse', '--verify', 'HEAD']).trim()) {
+    console.error('begin: this git repo has no commits yet. Commit your files first — begin reads tracked files, not the working directory.');
+  } else {
+    console.error('begin: this repo has commits but no tracked files match a known source extension. Check `git ls-files`.');
+  }
   process.exit(2);
 }
 
