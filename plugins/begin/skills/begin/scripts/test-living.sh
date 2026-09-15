@@ -107,9 +107,24 @@ git add -A; git commit -qm 'add typo section'
 echo 'export const a = 1234;' > src/a.ts
 git add -A; git commit -qm 'touch a again'
 node "$SCRIPTS/refresh.mjs" --root "$DIR" --quiet >/dev/null 2>&1
-grep -q 'files= matches nothing' .begin/stale.md \
+grep -q 'exist at neither' .begin/stale.md \
   && ok 'section with a non-existent files= path is reported unverifiable' \
   || bad 'bad files= reported unverifiable' "$(cat .begin/stale.md)"
+
+# The first version of this check tested the WHOLE list at once, so one valid
+# path masked any number of typos beside it — which is the likely shape of the
+# mistake, not the all-bogus case.
+cat >> BEGIN.md <<'EOF'
+
+<!-- begin:section id="mixed" sha="HEADSHA" files="src/a.ts,src/typo-here.ts" -->
+One good path, one typo.
+EOF
+sed -i.bak "s/sha=\"HEADSHA\"/sha=\"$(git rev-parse --short HEAD)\"/" BEGIN.md && rm -f BEGIN.md.bak
+git add -A; git commit -qm 'add mixed section'
+node "$SCRIPTS/refresh.mjs" --root "$DIR" --quiet >/dev/null 2>&1
+grep -q 'src/typo-here.ts' .begin/stale.md \
+  && ok 'a typo beside a VALID path is still reported (per-path, not all-or-nothing)' \
+  || bad 'mixed files= check' "$(cat .begin/stale.md)"
 
 # --- a section with NO files= can never go stale, so it must be called out
 cat >> BEGIN.md <<EOF

@@ -94,10 +94,16 @@ for (const s of sections) {
   if (!s.files.length) { unknown.push({ ...s, why: 'no files= recorded — there is nothing to diff against (use files="-" if it is deliberately not code-derived)' }); continue; }
   // Likewise a files= that matches no path at either end: a typo'd filename
   // produces an empty diff, which is indistinguishable from "unchanged".
-  const knownNow = git(['ls-tree', '-r', '--name-only', head, '--', ...s.files]).trim();
-  const knownThen = git(['ls-tree', '-r', '--name-only', s.sha, '--', ...s.files]).trim();
-  if (!knownNow && !knownThen) {
-    unknown.push({ ...s, why: `files= matches nothing at ${s.sha} or HEAD: ${s.files.join(', ')}` });
+  // PER PATH, not "all paths". Checking the whole list at once meant a single
+  // valid entry masked any number of typos beside it — the likely shape of the
+  // bug, not the all-bogus case that was originally tested.
+  const bogus = s.files.filter((f) => {
+    if (f.includes('*')) return false;                 // globs are checked by the diff itself
+    return !git(['ls-tree', '-r', '--name-only', head, '--', f]).trim()
+        && !git(['ls-tree', '-r', '--name-only', s.sha, '--', f]).trim();
+  });
+  if (bogus.length) {
+    unknown.push({ ...s, why: `files= names ${bogus.length} path(s) that exist at neither ${s.sha} nor HEAD: ${bogus.join(', ')}` });
     continue;
   }
   checked++;
@@ -142,10 +148,28 @@ if (stale.length) {
 }
 
 if (uncovered.length) {
-  lines.push(`## ${uncovered.length} source file(s) no section claims`);
+  // On a large repo "862 files no section claims" is guaranteed noise that
+  // buries the real signal. Report the count, but list only files that arrived
+  // AFTER the oldest stamp — those are the ones a section plausibly should have
+  // picked up.
+  const oldest = sections.map((s) => s.sha).filter(Boolean)
+    .map((sha) => ({ sha, t: +git(['show', '-s', '--format=%ct', sha]).trim() || Infinity }))
+    .sort((a, b) => a.t - b.t)[0];
+  const recent = oldest && Number.isFinite(oldest.t)
+    ? new Set(git(['diff', '--name-only', '--diff-filter=A', `${oldest.sha}..HEAD`]).split('\n').filter(Boolean))
+    : null;
+  const newOnes = recent ? uncovered.filter((f) => recent.has(f)) : uncovered;
+  lines.push(`## ${uncovered.length} source file(s) no section claims${newOnes.length !== uncovered.length ? `, ${newOnes.length} of them added since the oldest stamp` : ''}`);
   lines.push('');
-  lines.push(uncovered.slice(0, 25).map((f) => `- \`${f}\``).join('\n'));
-  if (uncovered.length > 25) lines.push(`- _…and ${uncovered.length - 25} more_`);
+  const show = (newOnes.length ? newOnes : uncovered).slice(0, 20);
+  lines.push(show.map((f) => `- \`${f}\``).join('\n'));
+  const total = newOnes.length || uncovered.length;
+  if (total > 20) lines.push(`- _…and ${total - 20} more_`);
+  if (!newOnes.length && uncovered.length > 20) lines.push('');
+  if (uncovered.length > 100 && newOnes.length === uncovered.length) {
+    lines.push('');
+    lines.push('_A very large count usually means BEGIN.md covers a few subsystems rather than the whole repo. That is fine — it is a map, not an index._');
+  }
   lines.push('');
 }
 

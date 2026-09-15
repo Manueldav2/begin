@@ -81,7 +81,14 @@ for f in CLAUDE.md AGENTS.md CONTRIBUTING.md README.md CHANGELOG.md; do
 done
 echo
 
-DIRTY="$(printf '%s\n' "$DIRTY_RAW" | head -40)"
+DIRTY="$(printf '%s\n' "$DIRTY_RAW" | sed '/^$/d' | head -40)"
+if [ -z "$DIRTY" ]; then
+  echo "## Uncommitted right now — nothing"
+  echo
+  echo "_The working tree is clean. There is no live edit to read; start from the branch"
+  echo "commits and the PR list below._"
+  echo
+fi
 if [ -n "$DIRTY" ]; then
   # An uncommitted diff made only of lockfiles and build output is npm noise,
   # not "the question the user is holding". Saying so stops the agent burning
@@ -197,22 +204,36 @@ else
   echo
 fi
 
-# A clone can sit months behind while `gh` happily reports PRs merged yesterday.
+# A clone can sit far behind while `gh` happily reports PRs merged yesterday.
 # Following "read what the newest PRs changed" then sends you to code that is
 # not in your working tree at all.
-if [ "$GH_OK" = 1 ]; then
-  HEAD_TS="$(git log -1 --format=%ct 2>/dev/null || echo 0)"
-  NEWEST_PR_DATE="$(gh pr list --state merged --limit 1 --json mergedAt --jq '.[0].mergedAt // ""' 2>/dev/null)"
-  if [ -n "$NEWEST_PR_DATE" ] && [ "$HEAD_TS" != 0 ]; then
-    PR_TS="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$NEWEST_PR_DATE" +%s 2>/dev/null || date -d "$NEWEST_PR_DATE" +%s 2>/dev/null || echo 0)"
-    if [ "$PR_TS" != 0 ]; then
-      DAYS=$(( (PR_TS - HEAD_TS) / 86400 ))
-      if [ "$DAYS" -gt 7 ]; then
-        echo "> [!WARNING]"
-        echo "> The newest merged PR is **$DAYS days newer than your HEAD**. These PRs are NOT in your"
-        echo "> working tree — do not read them as \"what the code now does\". Run \`git pull\` first."
-        echo
-      fi
+#
+# Measured in COMMITS, not days. A wall-clock guard missed a checkout that was
+# 169 commits behind because the newest PR was 7.09 days newer and the
+# comparison was `-gt 7` on integer-truncated days.
+BEHIND="$(git rev-list --count "HEAD..origin/$DEFAULT_BRANCH" 2>/dev/null || echo 0)"
+if [ "${BEHIND:-0}" -gt 0 ]; then
+  echo "> [!WARNING]"
+  echo "> Your checkout is **$BEHIND commit(s) behind \`origin/$DEFAULT_BRANCH\`**."
+  if [ "$GH_OK" = 1 ]; then
+    echo "> The merged PRs listed above are NOT all in your working tree. Do not read them as"
+    echo "> \"what the code now does\", and expect files they changed to be missing or older."
+  fi
+  echo "> Run \`git pull\` before trusting anything below about current behaviour."
+  echo
+
+  # Name the specific files that a reader would go looking for and not find.
+  if [ "$GH_OK" = 1 ]; then
+    MISSING=""
+    for n in $(gh pr list --state merged --limit 3 --json number --jq '.[].number' 2>/dev/null); do
+      for f in $(gh pr view "$n" --json files --jq '.files[].path' 2>/dev/null | head -20); do
+        [ -e "$f" ] || MISSING="$MISSING $f"
+      done
+    done
+    if [ -n "$MISSING" ]; then
+      echo "> Files changed by the newest merged PRs that do **not** exist in your checkout:"
+      for f in $MISSING; do echo ">   - \`$f\`"; done | head -12
+      echo
     fi
   fi
 fi

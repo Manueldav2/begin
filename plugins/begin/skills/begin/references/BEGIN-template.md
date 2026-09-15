@@ -15,6 +15,12 @@
 One paragraph, in the language of the person who uses the system — not the language of
 the code. What goes in, what comes out, who asks for it.
 
+**It must contain at least one sentence a reader could not have got from the README or
+`AGENTS.md`, citing a `file:line`.** Without that rule this section reliably degrades
+into paraphrasing the docs back at someone you just told to go read the docs. If the
+existing docs are good, say so in one line, link them, and spend this paragraph on what
+they leave out.
+
 ---
 
 ## 2. The fundamental mechanism

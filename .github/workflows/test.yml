@@ -27,7 +27,7 @@ jobs:
       - name: assertions must go red when the input is broken
         run: |
           set -e
-          for m in alias jsToTs valueCycle typeCycle; do
+          for m in alias jsToTs valueCycle typeCycle pyAbsolute pyDotDot generated duplicates pyHashComment pyShadow; do
             if node plugins/begin/skills/begin/scripts/test-scan.mjs --mutate "$m" >/dev/null 2>&1; then
               echo "mutation '$m' did NOT fail the suite — that assertion cannot detect its own bug"
               exit 1

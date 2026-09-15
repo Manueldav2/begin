@@ -57,13 +57,23 @@ it, and every limit is printed rather than implied.
 
 Full JS/TS and Python resolution: tsconfig `paths` (every config in the tree, plus
 `extends` and project `references`), NodeNext `./x.js` → `x.ts`, and Python absolute,
-relative and submodule imports against inferred roots. Other languages get size, churn
-and complexity but no edges — and the scan says so. ~3,400 files in under two seconds.
+relative and submodule imports against inferred roots. Python capture was measured at
+**97.9% recall / 98.0% precision** against an independent CPython `ast` ground truth on
+an 878-file repo.
 
-**It tells you when it is blind.** A shallow clone, a dropped file cap, or a language
-whose imports failed to resolve each produce a `[!WARNING]` block above the table. That
-block is the most important thing in the output: a ranking built on a broken graph looks
-exactly like a good one.
+**Every other language contributes no edges at all** — Go, Rust, Ruby, Java, Kotlin,
+Swift, PHP, C#, C/C++ get size, churn and complexity, and the scan says so in a warning
+rather than leaving you to infer it from an empty graph.
+
+Speed, measured warm-cache on real repos: 259 files 0.24s · 3,384 files 1.9s · 2,809
+files 1.9s · 1,819 files 2.5s · 1,397 files 3.5s. File count does not predict it —
+content does.
+
+**It tells you when it is blind.** A shallow clone (checked with
+`git rev-parse --is-shallow-repository`), a dead churn window, a dropped file cap, a
+language it cannot parse, or import resolution failing for a language it can — each
+produces a `[!WARNING]` block above the table. That block is the most important thing in
+the output: a ranking built on a broken graph looks exactly like a good one.
 
 ## The two layers
 
@@ -90,6 +100,7 @@ S=~/.claude/skills/begin/scripts
 node $S/test-scan.mjs                    # graph, cycles, surfaces, reachability, Python
 node $S/test-scan.mjs --mutate pyDotDot  # ...and prove the assertions can go red
 bash $S/test-living.sh                   # staleness, hooks, tree cleanliness
+bash $S/test-edge.sh                     # unicode paths, worktrees, concurrency, Go repos
 node $S/redact.mjs --self-test           # secrets caught AND clean text unharmed
 ```
 
@@ -112,7 +123,16 @@ Every assertion exists because that bug was real and shipped once. Among them:
   complex file in the fixture ranked last
 - a strongly-connected component was printed as `a ↔ b ↔ c`, asserting pairs that
   existed nowhere in the source
-- a stamped section whose `files=` had a typo reported itself **healthy forever**
+- a stamped section whose `files=` had a typo reported itself **healthy forever** — and
+  the first fix only caught it when *every* path was bogus, not the likely case of one
+  typo beside three good paths
+- a C-family comment stripper was run over Python: a `#` comment containing `/*` deleted
+  everything to end-of-file, taking 98 imports out of one repo's highest-ranked file
+  while `partial: false` asserted it had been read whole
+- `import stripe` resolved to a local `routes/stripe.py`, fabricating edges to a
+  same-named file for a package the repo's own `requirements.txt` declares
+- the resolver-health warning was gated on a JS/Python allowlist, so a Go repo produced
+  zero edges, called every file dead, and said nothing
 - the unclaimed-file check silently self-destructed the first time you followed the
   skill's own update advice
 - the hook discarded its own output, so the living-doc loop was invisible in practice

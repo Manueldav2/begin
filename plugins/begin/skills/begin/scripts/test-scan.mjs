@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const MUTATIONS = ['alias', 'jsToTs', 'valueCycle', 'typeCycle', 'pyAbsolute', 'pyDotDot'];
+const MUTATIONS = ['alias', 'jsToTs', 'valueCycle', 'typeCycle', 'pyAbsolute', 'pyDotDot', 'generated', 'duplicates', 'pyHashComment', 'pyShadow'];
 const MUTATE = process.argv.includes('--mutate') ? process.argv[process.argv.indexOf('--mutate') + 1] : null;
 // A typo'd mutation name used to run a clean fixture and print "all green",
 // so a broken mutation gate looked like a passing one.
@@ -89,6 +89,24 @@ w('py/pkg/models.py', `REAL = True\n`);
 w('py/pkg/sub/__init__.py', `\n`);
 w('py/pkg/sub/models.py', `DECOY = True\n`);
 w('py/pkg/sub/agent.py', `from ..models import REAL\n`);
+// A `#` comment containing `/*` made the C-family stripper delete everything to
+// EOF: 173,638 bytes and 98 imports from one real file, while `partial: false`
+// claimed it had been read whole.
+w('py/hashcomment.py', `# the renderer reads totals/*.json and open/reply rates, but not the rest
+import helpers
+from routes import leads
+
+def go():
+    return helpers.h()
+`);
+// A declared third-party package must never resolve to a local file of the same
+// name: \`import stripe\` is the SDK, not routes/stripe.py.
+w('requirements.txt', 'stripe>=7.0.0\nrequests\n');
+w('py/routes/stripe.py', `LOCAL = True\n`);
+// The importer must live INSIDE py/routes/ — that directory then becomes an
+// ancestor root, which is exactly how `import stripe` picked up the local
+// routes/stripe.py in the real repo.
+w('py/routes/uses_stripe.py', `import stripe\nX = 1\n`);
 // per-language complexity: `elif`/`except`/`and` are invisible to the C set
 w('py/logic.py', `def f(x):
     if x == 1:
@@ -106,7 +124,26 @@ w('py/logic.py', `def f(x):
 // one tag per line, so this tests markup complexity — not the minified detector
 w('markup/form.html', '<form>\n' + '  <label for="a">A</label>\n'.repeat(40) + '</form>\n');
 w('sql/schema.sql', '-- if for while case\n'.repeat(30) + 'CREATE TABLE t (id int);\n');
+// Real bundlers keep statement-level newlines: the esbuild bundle that defeated
+// the old detector averaged 113 chars/line and the rolldown one 30. A fixture
+// that is one 4800-char line satisfies every branch and CANNOT fail, which is
+// exactly why the detector shipped catching 0 of 15 real artifacts.
 w('src/vendor-bundle.min.js', 'var a=1;' + 'a&&a||a?a:a;'.repeat(400) + '\n');
+// esbuild-shaped: short lines, no .min. name, and deliberately under src/ —
+// a public/ or assets/ path would be caught by the PATH rule, so the fingerprint
+// would never actually be exercised and the assertion could not fail.
+w('src/app-esbuild.js', 'var x = (() => {\n  var __defProp = Object.defineProperty;\n'
+  + Array.from({ length: 120 }, (_, i) => `  var v${i} = a && b || c ? d : e;`).join('\n') + '\n})();\n');
+// rolldown-shaped: a banner comment and ordinary line lengths
+w('src/app-rolldown.js', '//#region \u0000rolldown/runtime.js\n'
+  + Array.from({ length: 120 }, (_, i) => `const q${i} = a && b || c;`).join('\n') + '\n');
+// the same built file checked in three times, which no line-length test catches
+const DUP = Array.from({ length: 40 }, (_, i) => `export const dup${i} = ${i} && ${i};`).join('\n') + '\n';
+// NOT under dist/ — that is in SKIP_DIR and would never be scanned, making the
+// assertion pass for the wrong reason.
+w('packages/a/shared-copy.js', DUP);
+w('packages/b/shared-copy.js', DUP);
+w('packages/c/shared-copy.js', DUP);
 // a `/*` inside a STRING must not eat the imports that follow it
 w('src/tricky.ts', `const PATTERN = "a/*b";
 import { b } from "./b.js";
@@ -121,6 +158,23 @@ if (MUTATE === 'jsToTs') w('src/a.ts', fs.readFileSync(path.join(dir, 'src/a.ts'
 if (MUTATE === 'valueCycle') w('src/c.ts', `export function c(n: number) { return n; }\n`);
 if (MUTATE === 'pyAbsolute') w('py/app.py', `from nowhere_at_all import leads\n`);
 if (MUTATE === 'pyDotDot') w('py/pkg/sub/agent.py', `from .models import DECOY\n`);
+// Make the bundles look like ordinary authored code: the detector must then
+// fail to drop them, proving these assertions can go red.
+if (MUTATE === 'pyHashComment') {
+  // Remove the /* from the comment: the imports below it must then survive
+  // either way, so this mutation proves the assertion is really testing the
+  // stripper rather than passing for an unrelated reason.
+  w('py/hashcomment.py', `import nowhere_module\nfrom nowhere import x\n\ndef go():\n    return 1\n`);
+}
+if (MUTATE === 'pyShadow') w('requirements.txt', 'requests\n');
+if (MUTATE === 'generated') {
+  w('src/app-esbuild.js', 'export const realCode = 1;\nexport function f(a) { return a + 1; }\n');
+  w('src/app-rolldown.js', 'export const alsoReal = 2;\nexport function g(b) { return b * 2; }\n');
+}
+if (MUTATE === 'duplicates') {
+  w('packages/b/shared-copy.js', 'export const different = 1;\n');
+  w('packages/c/shared-copy.js', 'export const alsoDifferent = 2;\n');
+}
 // Both edges must become value imports: flipping only one leaves no value cycle,
 // so a one-sided mutation cannot make the typeCycle assertion fail.
 if (MUTATE === 'typeCycle') {
@@ -214,6 +268,15 @@ check('py cx      elif/except/and are counted as decision points',
   `complexityProxy = ${byFile.get('py/logic.py')?.complexityProxy} (expected >= 6)`);
 
 // ---- complexity must not be inverted by markup / generated code
+check('py hash    a `#` comment containing /* does not erase the rest of the file',
+  byFile.get('py/hashcomment.py')?.imports.includes('py/helpers.py') &&
+  byFile.get('py/hashcomment.py')?.imports.includes('py/routes/leads.py'),
+  `imports = ${JSON.stringify(byFile.get('py/hashcomment.py')?.imports)} (both should survive the comment)`);
+
+check('py shadow  a declared dependency never resolves to a local file of the same name',
+  !(byFile.get('py/routes/uses_stripe.py')?.imports || []).some((i) => i.endsWith('routes/stripe.py')),
+  `imports = ${JSON.stringify(byFile.get('py/routes/uses_stripe.py')?.imports)} (stripe is declared in requirements.txt)`);
+
 check('cx markup  an HTML form scores 0 complexity (<label for=> is not a branch)',
   (byFile.get('markup/form.html')?.complexityProxy ?? -1) === 0,
   `complexityProxy = ${byFile.get('markup/form.html')?.complexityProxy}`);
@@ -222,10 +285,23 @@ check('cx sql     a comment-only .sql file scores 0 complexity',
   (byFile.get('sql/schema.sql')?.complexityProxy ?? -1) === 0,
   `complexityProxy = ${byFile.get('sql/schema.sql')?.complexityProxy}`);
 
-check('cx minified a minified bundle is flagged generated and kept OUT of the ranking',
-  scan.unparsed.some((u) => u.file === 'src/vendor-bundle.min.js') &&
-  !scan.files.some((f) => f.file === 'src/vendor-bundle.min.js'),
+const isDropped = (f) => scan.unparsed.some((u) => u.file === f) && !scan.files.some((x) => x.file === f);
+
+check('gen minified a .min.js bundle is flagged and kept OUT of the ranking',
+  isDropped('src/vendor-bundle.min.js'),
   `unparsed = ${JSON.stringify(scan.unparsed.map((u) => u.file))}`);
+
+check('gen esbuild  an esbuild bundle with SHORT lines is still detected',
+  isDropped('src/app-esbuild.js'),
+  'average line length does not catch modern bundlers — a fingerprint must');
+
+check('gen rolldown a rolldown bundle with ordinary line lengths is detected',
+  isDropped('src/app-rolldown.js'),
+  'the //#region rolldown banner should identify it');
+
+check('gen dupes    a file checked in 3x byte-identical is treated as a build artifact',
+  ['packages/a/shared-copy.js', 'packages/b/shared-copy.js', 'packages/c/shared-copy.js'].every(isDropped),
+  'content-hash duplicate detection did not fire');
 
 check('strip      `/*` inside a string does not erase the imports after it',
   byFile.get('src/tricky.ts')?.imports.includes('src/b.ts'),

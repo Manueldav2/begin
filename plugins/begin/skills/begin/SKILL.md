@@ -32,9 +32,10 @@ measurement pointed at.
    a parse. Nesting is measured from indentation. Say so; do not launder a proxy into
    a fact.
 5. **A degraded measurement is announced, never quietly used.** The scan prints a
-   `[!WARNING]` block when churn is dead, when files were dropped, or when import
-   resolution failed for a language. **Read that block before the table.** A ranking
-   built on a broken graph looks exactly like a good one.
+   `[!WARNING]` block for a shallow clone, a dead churn window, dropped files, a
+   language it cannot parse at all, or resolution failing for one it can. **Read that
+   block before the table, and repeat what it says in BEGIN.md.** A ranking built on a
+   broken graph looks exactly like a good one — that is the whole danger.
 
 ## Run it
 
@@ -47,8 +48,9 @@ node  $S/scan.mjs      # structure: import graph, hotspots, surface->engine
 
 Both write to `.begin/` and print a digest. Run them from anywhere in the repo — the
 scan anchors itself to the repo root. `recon.sh` degrades cleanly with no `gh`, no
-network and no remote, but it **requires `node`** (redaction is mandatory). ~3,400
-source files scan in under two seconds; a 1,800-file polyglot repo in about three.
+network and no remote, but it **requires `node`** (redaction is mandatory). Measured
+warm-cache: 259 files 0.24s · 3,384 files 1.9s · 2,809 files 1.9s · 1,819 files 2.5s ·
+1,397 files 3.5s. File count does not predict the time; content does.
 
 Flags worth knowing:
 
@@ -72,10 +74,15 @@ edits, branch-vs-main commits, the last ~20 merged PRs with **their bodies**, an
 each changed. That is the focus prior. Read `.begin/recon.md` fully; it is short.
 
 The uncommitted diff is usually the most informative thing in the repo — it is the
-question the user is currently holding. Two caveats recon now flags for you: if the
-diff is only lockfiles and build output it says so (do not spend your first read
-there), and if the newest merged PR is much newer than HEAD it warns you, because
-those PRs are **not in the working tree** and reading them as current is a mistake.
+question the user is currently holding. Recon flags three things about it: when the
+tree is clean it says so explicitly (rather than omitting the section and leaving you
+hunting), when the diff is only lockfiles and build output it tells you not to spend
+your first read there, and when your checkout is behind `origin` it says by **how many
+commits** and names the files from recent PRs that are not in your tree.
+
+**That last one is a precondition, not a caveat.** If recon reports you are behind,
+step 3.2 below is unsafe: the PR file lists describe code you do not have. Either
+`git pull` first, or skip the PR-reading step and say in BEGIN.md that you did.
 
 ### 2. Structure second
 
@@ -91,7 +98,8 @@ You then have, measured rather than assumed:
   different animal from one at the top for `depended-on`; the column tells you which
   conversation to have.
 - **Surface → engine paths** — the literal import chain from an endpoint or a button
-  down to the hard part, computed by BFS.
+  down to the hard part, computed by BFS. A path that crosses a lazy `await import()`
+  edge is labelled as such, because it is resolved at call time rather than load time.
 - **Import cycle groups** — strongly-connected sets over *static value* edges, with one
   real directed loop walked out. Type-only and lazy (`await import(...)`) edges are
   excluded, because neither forms a real initialisation cycle.
@@ -223,10 +231,12 @@ lying.
   WebSocket call and is invisible by construction. The scan flags unreachable files
   precisely so a human can judge.
 - Full JS/TS and Python resolution — tsconfig `paths` (every config in the tree, not
-  just the root), `extends`, NodeNext `./x.js` → `x.ts`, and Python absolute, relative
-  and submodule imports against inferred roots. Go, Rust, Ruby, Java, Swift and PHP get
-  size, churn and complexity but **no edges**, so importance is understated for them.
-  Say so when scanning such a repo.
+  just the root), `extends`, project `references`, NodeNext `./x.js` → `x.ts`, and
+  Python absolute, relative and submodule imports against inferred roots (measured at
+  ~98% recall and precision against a CPython `ast` ground truth). **Go, Rust, Ruby,
+  Java, Kotlin, Swift, PHP, C# and C/C++ contribute no edges at all.** In such a repo
+  every file shows importance at the floor and appears "unreachable"; the scan warns,
+  and you must repeat that warning rather than reporting an empty graph as a finding.
 - `complexityProxy` counts decision points per language, in code with comments and
   single-line strings removed. Markup and schema files score 0 by design; vendored,
   minified and generated files are detected and ranked separately. Multi-line template

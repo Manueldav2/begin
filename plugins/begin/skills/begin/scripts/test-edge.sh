@@ -156,6 +156,23 @@ grep -q "Merge branch 'side'" .begin/recon.md \
   && ok 'a local-only repo falls back to listing merge commits' \
   || bad 'gh fallback' 'no merge commits listed for a non-GitHub repo'
 
+# ---------------------------------------------------------------- honesty about blind spots
+
+# A language whose imports are not parsed produced 0 edges, declared every file
+# "unreachable (dead code)", and said NOTHING — because the health check was
+# gated on a JS/Python allowlist instead of on the evidence.
+mkdir -p "$WORK/gorepo/pkg/alpha" "$WORK/gorepo/cmd/app"; cd "$WORK/gorepo"
+git init -q -b main .; git config user.email t@e.com; git config user.name T
+for i in $(seq 1 12); do printf 'package alpha\nfunc F%s() int { return %s }\n' "$i" "$i" > "pkg/alpha/f$i.go"; done
+printf 'package main\nimport "example.com/m/pkg/alpha"\nfunc main() { _ = alpha.F1() }\n' > cmd/app/main.go
+printf 'module example.com/m\ngo 1.21\n' > go.mod
+git add -A; git commit -qm init
+GOOUT="$(node "$SCRIPTS/scan.mjs" 2>/dev/null)"
+case "$GOOUT" in
+  *'.go` imports are not parsed'*) ok 'a Go repo is told its imports are not parsed, not silently emptied' ;;
+  *) bad 'unparsed-language warning' 'no warning for a 13-file Go repo with 0 edges' ;;
+esac
+
 # ---------------------------------------------------------------- concurrency
 
 # The post-commit hook runs a scan on EVERY commit, so two scans racing is the
