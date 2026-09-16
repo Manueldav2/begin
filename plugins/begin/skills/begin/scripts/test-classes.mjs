@@ -75,6 +75,10 @@ const quoting = {
   'apostrophe in block comment': `import { r } from "./real.js";\n/* don't do this: import { g } from "./ghost.js"; */\nexport const a = r;\n`,
   'CRLF line comment': `import { r } from "./real.js";\r\n// import { g } from "./ghost.js";\r\nexport const a = r;\r\n`,
   'trailing backslash string': `import { r } from "./real.js";\nconst s = "ends with backslash \\\\";\n// import { g } from "./ghost.js";\nexport const a = r + s;\n`,
+  'non-null assertion then division': `import { r } from "./real.js";\nconst pct = r! / 2;   // import { g } from "./ghost.js";\nexport const a = pct;\n`,
+  'postfix increment then division': `import { r } from "./real.js";\nlet n = r;\nconst h = n++ / 2;   // import { g } from "./ghost.js";\nexport const a = h;\n`,
+  'jsx apostrophe with jsx comment same line': `import { r } from "./real.js";\nexport const C = () => <p>don't {/* import { g } from "./ghost.js"; */}</p>;\nexport const a = r;\n`,
+  'jsx apostrophe with line comment same line': `import { r } from "./real.js";\nexport const C = () => <p>don't</p>; // import { g } from "./ghost.js";\nexport const a = r;\n`,
 };
 
 for (const [name, body] of Object.entries(quoting)) {
@@ -96,6 +100,22 @@ for (const [name, body] of Object.entries(quoting)) {
     else ok(`A/${name}`);
   } catch (e) { bad(`A/${name}`, `scan threw: ${e.message.slice(0, 90)}`); }
   finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+// The inverse invariant: blanking template text must not delete a REAL import
+// living inside a `${...}` interpolation.
+{
+  const dir = repo({
+    'package.json': '{"name":"q"}',
+    'src/subject.js': 'const t = `\n  ${(await import("./real.js")).r}\n`;\nexport const a = t;\n',
+    'src/real.js': 'export const r = 1;\n',
+  });
+  try {
+    const by = scan(dir);
+    const imports = by.get('src/subject.js')?.imports || [];
+    if (!imports.includes('src/real.js')) bad('A/dynamic import inside multiline template', `real edge DELETED (${JSON.stringify(imports)})`);
+    else ok('A/dynamic import inside multiline template');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
 // Python: a docstring usage example must not become an edge either.
@@ -130,6 +150,13 @@ const manifests = {
   'requirements pinned': ['requirements.txt', 'stripe==7.0.0\nrequests\n'],
   'requirements with extras': ['requirements.txt', 'stripe[webhooks]>=7\n'],
 };
+// Split requirements layouts: the package is declared in a file the parser has
+// to go find, and missing it fabricates a local edge with no warning.
+const splitManifests = {
+  'requirements -r include': { 'requirements.txt': '-r base.txt\n', 'base.txt': 'stripe>=7\n' },
+  'requirements/ directory': { 'requirements/base.txt': 'stripe>=7\n', 'requirements/prod.txt': '-r base.txt\n' },
+  'pip-tools .in': { 'requirements.in': 'stripe>=7\n' },
+};
 
 for (const [name, [file, body]] of Object.entries(manifests)) {
   const dir = repo({
@@ -142,6 +169,21 @@ for (const [name, [file, body]] of Object.entries(manifests)) {
     const by = scan(dir);
     const imports = by.get('routes/app.py')?.imports || [];
     if (imports.some((i) => i.endsWith('routes/stripe.py'))) bad(`B/${name}`, `fabricated a local edge for a declared package (${JSON.stringify(imports)})`);
+    else ok(`B/${name}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+for (const [name, files] of Object.entries(splitManifests)) {
+  const dir = repo({
+    ...files,
+    'routes/__init__.py': '',
+    'routes/stripe.py': 'LOCAL = True\n',
+    'routes/app.py': 'import stripe\nX = 1\n',
+  });
+  try {
+    const by = scan(dir);
+    const imports = by.get('routes/app.py')?.imports || [];
+    if (imports.some((i) => i.endsWith('routes/stripe.py'))) bad(`B/${name}`, `fabricated a local edge (${JSON.stringify(imports)})`);
     else ok(`B/${name}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -166,6 +208,44 @@ for (const [name, [file, body]] of Object.entries(localPkgCases)) {
     const imports = by.get('myapp/api.py')?.imports || [];
     if (!imports.includes('myapp/engine.py')) bad(`B/local: ${name}`, `manifest DESTROYED a real local edge (${JSON.stringify(imports)})`);
     else ok(`B/local: ${name}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+// ───────────────────────────── D. a broken graph is never reported as healthy
+
+console.log('\nCLASS D — an unresolved first-party import is always counted, however it is declared');
+
+const silencing = {
+  'python src-layout self-declared': {
+    'pyproject.toml': '[project]\nname = "mylib"\ndependencies = ["mylib", "requests"]\n',
+    'src/mylib/core.py': 'def go(): return 1\n',
+    'tests/test_core.py': 'from mylib.core import go\n\ndef test(): assert go()\n',
+  },
+  'python monorepo sibling package': {
+    'pyproject.toml': '[project]\nname = "a"\ndependencies = ["b"]\n',
+    'packages/a/main.py': 'from b.core import go\nX = go\n',
+    'packages/b/src/b/core.py': 'def go(): return 1\n',
+  },
+  'js workspace cross-package': {
+    'package.json': '{"name":"root","workspaces":["packages/*"]}',
+    'packages/a/package.json': '{"name":"@acme/a","main":"index.js","dependencies":{"@acme/b":"*"}}',
+    'packages/a/index.js': 'import { b } from "@acme/b";\nexport const a = b;\n',
+    'packages/b/package.json': '{"name":"@acme/b","main":"index.js"}',
+    'packages/b/index.js': 'export const b = 1;\n',
+  },
+};
+
+for (const [name, files] of Object.entries(silencing)) {
+  const dir = repo(files);
+  try {
+    execFileSync('node', [path.join(HERE, 'scan.mjs'), '--root', dir, '--json-only'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const j = JSON.parse(fs.readFileSync(path.join(dir, '.begin/scan.json'), 'utf8'));
+    const mdTxt = fs.readFileSync(path.join(dir, '.begin/scan.md'), 'utf8');
+    const resolved = j.counts.edges > 0;
+    const warned = /\[!WARNING\]/.test(mdTxt) || j.counts.unresolvedSpecifiers > 0;
+    // Either the edge resolves, or the tool says out loud that it could not.
+    if (resolved || warned) ok(`D/${name}${resolved ? ' (resolved)' : ' (unresolved, and reported)'}`);
+    else bad(`D/${name}`, `edges=0, unresolvedSpecifiers=0, no warning — a broken graph reported as healthy`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 

@@ -56,8 +56,10 @@ it, and every limit is printed rather than implied.
 | Cycles | Tarjan SCC over **static value** imports, with one real loop walked | type-only and `await import()` edges excluded |
 
 Full JS/TS and Python resolution: tsconfig `paths` (every config in the tree, plus
-`extends` and project `references`), NodeNext `./x.js` → `x.ts`, and Python absolute,
-relative and submodule imports against inferred roots. Python capture was measured at
+`extends` and project `references`), NodeNext `./x.js` → `x.ts`, **workspace packages**
+(`@acme/b` resolves to that package's source in a pnpm/turbo monorepo), and Python
+absolute, relative and submodule imports against inferred roots, with dependency
+manifests read in nine dialects including `-r` includes. Python capture was measured at
 **97.9% recall / 98.0% precision** against an independent CPython `ast` ground truth on
 an 878-file repo.
 
@@ -123,6 +125,10 @@ remembered repro:
   manifest must never destroy a real local edge.
 - **6 CommonMark fence styles** plus the unclosed-fence case — a documentation stamp
   must never be parsed as a real section, and a real stamp must never be swallowed.
+- **3 "silently empty graph" layouts** (a Python src-layout package that declares
+  itself, a Python monorepo sibling, a JS workspace cross-package import) — an
+  unresolved first-party import must always be *counted*, however it is declared.
+  A broken graph reported as healthy is the worst thing this tool can do.
 
 Adding a dialect or a quoting context is one line in that file.
 

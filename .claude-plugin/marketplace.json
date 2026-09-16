@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "begin \u2014 land in any codebase and know where to look. Measured orientation plus a living BEGIN.md.",
-    "version": "1.4.0"
+    "version": "1.5.0"
   },
   "plugins": [
     {
       "name": "begin",
       "description": "Orient in a codebase from evidence: PageRank over the real import graph, git churn, recent PRs, surface-to-engine paths, and a living BEGIN.md that stays honest on every push.",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "author": {
         "name": "Manuel David"
       },
