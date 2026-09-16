@@ -51,7 +51,25 @@ const rawDoc = fs.readFileSync(BEGIN_MD, 'utf8');
 // in this repo" diagnoses, and — worse — added their files= to the claimed set,
 // suppressing real unclaimed-file findings. SKILL.md itself ships a fenced
 // example stamp, so following the skill triggered this.
-const doc = rawDoc.replace(/^```[\s\S]*?^```/gm, '').replace(/`[^`\n]*`/g, '');
+// A regex over fences fails in BOTH directions: it missed indented fences (any
+// fence inside a list item), ~~~ fences and fences inside blockquotes — so
+// documentation stamps became real sections — and an unclosed fence paired with
+// the NEXT block's opener, deleting a real stamp in between and silently
+// disabling staleness for it while printing "all sections are current".
+function stripFences(txt) {
+  let fence = null;
+  const out = [];
+  for (const line of txt.split('\n')) {
+    const body = line.replace(/^\s{0,3}(?:>\s?)*/, '');   // blockquote + up to 3 spaces
+    const m = body.match(/^(`{3,}|~{3,})(.*)$/);
+    if (!fence && m) { fence = m[1][0]; out.push(''); continue; }
+    if (fence && m && m[1][0] === fence && !m[2].trim()) { fence = null; out.push(''); continue; }
+    out.push(fence ? '' : line);
+  }
+  return { text: out.join('\n'), unclosed: !!fence };
+}
+const fenced = stripFences(rawDoc);
+const doc = fenced.text.replace(/`[^`\n]*`/g, '');
 
 // <!-- begin:section id="x" sha="abc1234" files="a.ts,b/**" -->
 const STAMP = /<!--\s*begin:section\s+([^>]*?)-->/g;
@@ -69,11 +87,23 @@ while ((m = STAMP.exec(doc))) {
   });
 }
 
+// A stamp that the fence stripper swallowed would silently stop being checked,
+// so compare what the raw document contains against what we parsed and say so.
+const rawStampCount = (rawDoc.match(/<!--\s*begin:section\s/g) || []).length;
+
 const lines = [];
 lines.push('# begin: staleness');
 lines.push('');
 lines.push(`_checked ${new Date().toISOString()} · HEAD \`${head.slice(0, 9)}\` · ${sections.length} stamped section(s)_`);
 lines.push('');
+
+const swallowed = rawStampCount - sections.length;
+if (fenced.unclosed || swallowed > 0) {
+  lines.push('> [!WARNING]');
+  if (fenced.unclosed) lines.push('> `BEGIN.md` has an **unclosed code fence** — everything after it was ignored.');
+  if (swallowed > 0) lines.push(`> ${swallowed} stamp(s) present in the file were **not parsed** (inside a code fence or inline code). Those sections are NOT being checked for staleness.`);
+  lines.push('');
+}
 
 if (sections.length === 0) {
   lines.push('`BEGIN.md` carries no `<!-- begin:section ... -->` stamps, so staleness cannot be');

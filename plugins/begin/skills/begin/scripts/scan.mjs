@@ -123,6 +123,7 @@ const truncatedCount = Math.max(0, allCode.length - MAX_FILES);
 const files = allCode.slice(0, MAX_FILES);
 
 const fileSet = new Set(files);
+const pyFiles = files.filter((f) => f.endsWith('.py'));
 
 // ---------------------------------------------------------------- read + per-file metrics
 
@@ -177,7 +178,12 @@ function looksGenerated(file, src, lineCount) {
   const ids = head.match(/\b[A-Za-z_$][\w$]*\b/g) || [];
   if (ids.length > 200) {
     const single = ids.filter((t) => t.length === 1).length / ids.length;
-    if (single > 0.45) return 'minified';
+    // Corroborate with indentation. Hand-written numeric, parser and shader code
+    // is full of i/j/k/a/b/m — exactly the code this tool exists to surface as
+    // "the hard part" — and the ratio alone deleted a 130-line matrix library.
+    // Real minified output is also essentially unindented.
+    const indented = (src.match(/^[ \t]+\S/gm) || []).length / Math.max(1, lineCount);
+    if (single > 0.45 && indented < 0.2) return 'minified';
   }
   return null;
 }
@@ -198,20 +204,76 @@ function stripComments(src) {
   let out = '';
   for (let i = 0; i < src.length;) {
     const ch = src[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const q = ch;
-      // A ' or " cannot span a line. Without that bound, a quote inside a regex
-      // character class (/["']/) or a JSX apostrophe (<p>don't</p>) shifted
-      // quote parity for the rest of the file, left the next block comment
-      // unstripped, and turned a commented-out `import` into a real edge —
-      // dead code presented as live, with no signal.
-      if (q === '`' && src.indexOf('`', i + 1) === -1) { out += ch; i++; continue; }
-      out += ch; i++;
-      while (i < src.length && src[i] !== q && (q === '`' || src[i] !== '\n')) {
-        if (src[i] === '\\') { out += src[i++] ?? ''; if (i < src.length) out += src[i++]; continue; }
-        out += src[i++];
+    // Comments FIRST. The regex heuristic below fires after `;`, and `;` is
+    // exactly what precedes a line comment — so checking regex first made
+    // `// import ...` be consumed as a regex literal and never stripped.
+    if (ch === '/' && src[i + 1] === '*') {
+      const e = src.indexOf('*/', i + 2);
+      i = e === -1 ? src.length : e + 2;
+      out += ' ';
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      const e = src.indexOf('\n', i);
+      i = e === -1 ? src.length : e;
+      continue;
+    }
+    // Regex literals are skipped wholesale: a quote or backtick inside /[`"']/
+    // otherwise shifts string parity for everything after it. A `/` begins a
+    // regex only after an operator, keyword or open bracket.
+    // `<` and `>` are deliberately NOT regex-start characters: `</p>` is a JSX
+    // closing tag in every .jsx/.tsx file, and treating it as a regex opener
+    // consumed everything up to the next `/` — including a trailing comment.
+    // `a < /re/` is vanishingly rare by comparison.
+    if (ch === '/' && /(?:[([{,;:=!&|?+\-*%~^]|\breturn|\btypeof|\bcase)\s*$/.test(out)) {
+      let j = i + 1, cls = false, ok = false;
+      while (j < src.length && src[j] !== '\n') {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === '[') cls = true;
+        else if (src[j] === ']') cls = false;
+        else if (src[j] === '/' && !cls) { ok = true; break; }
+        j++;
       }
-      if (i < src.length && src[i] === q) out += src[i++];
+      if (ok) { out += src.slice(i, j + 1); i = j + 1; continue; }
+    }
+    if (ch === '`') {
+      const start = i;
+      out += ch; i++;
+      let body = '';
+      while (i < src.length && src[i] !== '`') {
+        if (src[i] === '\\') { body += src[i++] ?? ''; if (i < src.length) body += src[i++]; continue; }
+        body += src[i++];
+      }
+      if (i >= src.length) { out = out.slice(0, -1); i = start + 1; out += src[start]; continue; }
+      // A template body that spans a newline can never be an import specifier,
+      // so blank it: that kills commented-out imports inside template bodies and
+      // nested-template parity confusion, while single-line templates (which can
+      // legitimately hold a specifier) are preserved.
+      out += body.includes('\n') ? body.replace(/[^\n]/g, ' ') : body;
+      out += src[i++];
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const q = ch;
+      // A ' or " cannot span a line. Without that bound, a JSX apostrophe
+      // (<p>don't</p>) shifted quote parity for the rest of the file, left the
+      // next block comment unstripped, and turned a commented-out `import` into
+      // a real edge — dead code presented as live, with no signal.
+      // Scan ahead first. If the quote never closes on this line we
+      // mis-identified the opener (a JSX apostrophe in `don't`, an English
+      // contraction in text) — treat it as ordinary punctuation and carry on,
+      // so a trailing `// import ...` on the same line is still stripped
+      // instead of being absorbed as string content.
+      let j = i + 1;
+      let closed = false;
+      while (j < src.length && src[j] !== '\n') {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === q) { closed = true; break; }
+        j++;
+      }
+      if (!closed) { out += ch; i++; continue; }
+      out += src.slice(i, j + 1);
+      i = j + 1;
       continue;
     }
     if (ch === '/' && src[i + 1] === '*') {
@@ -245,7 +307,11 @@ function stripCommentsPy(src) {
       const q = src.slice(i, i + 3);
       const e = src.indexOf(q, i + 3);
       const end = e === -1 ? src.length : e + 3;
-      out += src.slice(i, end);            // kept here; decontent blanks it
+      // BLANKED, not kept (newlines preserved so offsets/LOC stay right). An
+      // import specifier is never inside a triple-quoted string, but a docstring
+      // usage example containing `from app.util import helper` is near-universal
+      // — and keeping it turned documentation into graph edges.
+      out += src.slice(i, end).replace(/[^\n]/g, ' ');
       i = end; continue;
     }
     if (ch === '"' || ch === "'") {
@@ -505,7 +571,7 @@ function resolvePyModule(fromFile, level, mod) {
   // A directory with __init__.py IS this repo's package; no manifest entry may
   // override it. (routes/stripe.py is a bare module in a non-root directory,
   // which is why the shadowing guard still applies there.)
-  const isLocalPkg = top && pyRootsFor(fromFile).some((r) => fileSet.has(path.posix.join(r, top, '__init__.py')));
+  const isLocalPkg = !!top && pyRootsFor(fromFile).some((r) => pyDirHasSource(path.posix.join(r, top)));
   if (!isLocalPkg && top && (declaredDeps.has(top) || declaredDeps.has(top.toLowerCase().replace(/-/g, '_')) || PY_STDLIB.has(top))) return null;
   const rel = mod.replace(/\./g, '/');
   for (const r of pyRootsFor(fromFile)) {
@@ -513,6 +579,19 @@ function resolvePyModule(fromFile, level, mod) {
     if (hit) return hit;
   }
   return null;
+}
+
+// Any tracked .py under a directory is proof it is THIS repo's code, whether or
+// not it has __init__.py — PEP 420 namespace packages have none, and requiring
+// one let a manifest entry delete real edges.
+const pyDirCache = new Map();
+function pyDirHasSource(dir) {
+  if (!dir) return false;
+  if (pyDirCache.has(dir)) return pyDirCache.get(dir);
+  const prefix = dir + '/';
+  const hit = fileSet.has(prefix + '__init__.py') || pyFiles.some((f) => f.startsWith(prefix));
+  pyDirCache.set(dir, hit);
+  return hit;
 }
 
 function resolvePyPath(cand) {
@@ -592,23 +671,55 @@ for (const f of tracked) {
   } else if (/^requirements.*\.txt$/.test(base) || base === 'pyproject.toml' || base === 'Pipfile' || base === 'setup.cfg') {
     try {
       const txt = fs.readFileSync(path.join(ROOT, f), 'utf8');
-      // Only DEPENDENCY sections. Reading every line of pyproject.toml swept up
-      // `[tool.setuptools] packages = ["app"]` — the project's OWN package —
-      // into the third-party set, which then destroyed 30 real edges and
-      // silenced the graph-health warning at the same time.
+      // Python dependency manifests come in at least nine dialects. Handling
+      // only the three obvious ones let third-party names through, and every
+      // one of those fabricated an edge to a local file of the same name.
+      //   PEP 621 inline      dependencies = ["stripe"]
+      //   PEP 621 multi-line  dependencies = [\n "stripe",\n]
+      //   optional extras     [project.optional-dependencies] pay = ["stripe"]
+      //   poetry              [tool.poetry.dependencies] stripe = "^7"
+      //   Pipfile             [packages] stripe = "*"
+      //   setup.cfg           install_requires = ...
+      //   requirements.txt    (incl. `-r other.txt`, which is not a package)
       const isReqTxt = /^requirements.*\.txt$/.test(base);
+      const eat = (v) => {
+        const m2 = String(v).match(/^["']?([A-Za-z0-9_.-]+)/);
+        if (m2 && m2[1] && m2[1] !== '-r') declaredDeps.add(m2[1].toLowerCase().replace(/-/g, '_'));
+      };
+      const quoted = (line) => { for (const q of line.match(/["']([^"']+)["']/g) || []) eat(q.slice(1)); };
       let inDeps = isReqTxt;
       for (const raw of txt.split('\n')) {
         const line = raw.trim();
         if (!line || line.startsWith('#')) continue;
-        if (!isReqTxt) {
-          if (/^\[/.test(line)) { inDeps = /dependencies|packages\.find|requires/i.test(line) && !/tool\.setuptools\]/i.test(line); continue; }
-          if (/^(dependencies|install_requires|requires)\s*=/.test(line)) { inDeps = true; continue; }
-          if (/^[A-Za-z_][\w.-]*\s*=/.test(line) && !/^(dependencies|install_requires|requires)\s*=/.test(line)) { inDeps = false; continue; }
-          if (!inDeps) continue;
+        if (isReqTxt) {
+          if (/^-/.test(line)) continue;      // -r base.txt, -e ., --index-url
+          eat(line);
+          continue;
         }
-        const m2 = line.match(/^["']?([A-Za-z0-9_.-]+)/);
-        if (m2) declaredDeps.add(m2[1].toLowerCase().replace(/-/g, '_'));
+        if (/^\[/.test(line)) {
+          // `[tool.setuptools]` and `packages.find` declare THIS project's own
+          // packages — reading them as dependencies destroyed real edges.
+          inDeps = /(^|\.)\[?(dev-)?packages\]|dependencies|install_requires|^\[options\]/i.test(line)
+                   && !/tool\.setuptools\]|packages\.find/i.test(line);
+          continue;
+        }
+        const kv = line.match(/^([A-Za-z_][\w.-]*)\s*=\s*(.*)$/);
+        if (kv) {
+          const [, key, rest] = kv;
+          if (/^(dependencies|install_requires|requires)$/i.test(key)) {
+            inDeps = true;
+            quoted(rest);                      // the array may be INLINE on this line
+            continue;
+          }
+          if (inDeps) {
+            // Inside a dependency table the KEY is the package (poetry, Pipfile)
+            // and extras groups put the packages in the quoted value.
+            if (key.toLowerCase() !== 'python') eat(key);
+            quoted(rest);
+          }
+          continue;
+        }
+        if (inDeps) { eat(line); quoted(line); }
       }
     } catch { /* unreadable manifest */ }
   }
@@ -855,9 +966,14 @@ try {
     // Split on the LAST whitespace run so a path containing spaces survives,
     // and strip a leading ./ — both used to be discarded without a word, which
     // silently defeated the documented escape hatch for correcting the scan.
-    const m2 = t.match(/^(.*?)(?:[ \t]+(\S+))?$/);
-    const p2 = (m2?.[1] || '').replace(/^\.\//, '');
-    if (p2) declaredSurfaces.set(p2, m2?.[2] || 'declared');
+    // Prefer "<path> <kind>" only when the head is actually a tracked file;
+    // otherwise the whole line is the path. A lazy .*? split `my dir/a.ts` on
+    // the FIRST space, which is the opposite of what the comment promised.
+    const split = t.match(/^(.*\S)[ \t]+(\S+)$/);
+    const whole = t.replace(/^\.\//, '');
+    const headPath = split ? split[1].replace(/^\.\//, '') : null;
+    if (headPath && fileSet.has(headPath)) declaredSurfaces.set(headPath, split[2]);
+    else if (whole) declaredSurfaces.set(whole, split && !fileSet.has(whole) ? split[2] : 'declared');
   }
 } catch { /* optional file */ }
 
@@ -1192,7 +1308,7 @@ if (warnings.length) {
   md.push('');
 }
 
-md.push('> **How to read this.** `complexityProxy` = decision-point count, not a parse. `maxNesting` = indentation depth. `importance` = PageRank over the value-import graph, damped by file size — read it together with `fanIn`, which is the plain count of files that import this one. `why` names the single term that put a row in the table.');
+md.push('> **How to read this.** `complexityProxy` = decision-point count, not a parse. `maxNesting` = indentation depth. `importance` = PageRank over the value-import graph, damped by BOTH file size and direct fan-in — so an entry point, which nothing imports, is always exactly `0`, and a small file with few importers is damped hard. Read it together with `fanIn`. `why` names the single term that put a row in the table.');
 md.push('>');
 md.push('> Every column is a LEAD, not a verdict — including `fanIn` and `hops←surface`, which are only as good as the import graph above. Open the file before you cite it.');
 md.push('');
@@ -1271,11 +1387,22 @@ if (cycles.length) {
   md.push('');
 }
 
-const orphans = ranked.filter((f) => !depth.has(f) && surfaces.get(f) !== 'test').slice(0, 15);
-if (orphans.length) {
-  md.push('## Unreachable from any surface (dead code, or a surface we failed to detect)');
+// A file imported by eight test files is not dead code. Printing it under that
+// heading is the single claim most likely to get real code deleted.
+const allOrphans = ranked.filter((f) => !depth.has(f) && surfaces.get(f) !== 'test');
+const testOnly = allOrphans.filter((f) => (importedBy.get(f) || []).length > 0);
+const trueOrphans = allOrphans.filter((f) => (importedBy.get(f) || []).length === 0);
+if (trueOrphans.length) {
+  md.push('## Imported by nothing at all (dead code, or a surface we failed to detect)');
   md.push('');
-  md.push(orphans.map((f) => `\`${f}\``).join(', '));
+  md.push(trueOrphans.slice(0, 15).map((f) => `\`${f}\``).join(', '));
+  if (trueOrphans.length > 15) md.push(`\n_…and ${trueOrphans.length - 15} more._`);
+  md.push('');
+}
+if (testOnly.length) {
+  md.push('## Reached only from tests — NOT dead');
+  md.push('');
+  md.push(testOnly.slice(0, 15).map((f) => `\`${f}\` (imported by ${(importedBy.get(f) || []).length})`).join(', '));
   md.push('');
 }
 

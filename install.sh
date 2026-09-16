@@ -84,6 +84,7 @@ run() {
 run "node $DEST/scripts/test-scan.mjs"        "test-scan.mjs  (import graph, cycles, surfaces)"
 run "bash $DEST/scripts/test-living.sh"       "test-living.sh (staleness, hooks, tree cleanliness)"
 run "bash $DEST/scripts/test-edge.sh"         "test-edge.sh   (unicode, worktrees, concurrency)"
+run "node $DEST/scripts/test-classes.mjs"     "test-classes.mjs (quoting, manifests, fences — by class)"
 run "node $DEST/scripts/redact.mjs --self-test" "redact.mjs     (secret scrubbing)"
 
 echo

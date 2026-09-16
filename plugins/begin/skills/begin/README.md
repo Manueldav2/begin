@@ -101,11 +101,30 @@ node $S/test-scan.mjs                    # graph, cycles, surfaces, reachability
 node $S/test-scan.mjs --mutate pyDotDot  # ...and prove the assertions can go red
 bash $S/test-living.sh                   # staleness, hooks, tree cleanliness
 bash $S/test-edge.sh                     # unicode paths, worktrees, concurrency, Go repos
+node $S/test-classes.mjs                 # INVARIANTS over whole classes (see below)
 node $S/redact.mjs --self-test           # secrets caught AND clean text unharmed
 ```
 
 CI runs all of these on Linux and macOS and **fails if a mutation does not turn its
 assertion red** — a test that cannot fail is worth less than no test.
+
+`test-classes.mjs` exists because of a pattern worth naming. Four review rounds found
+that fixing a bug repeatedly shipped a *new* bug of the same class, while every pinned
+assertion stayed green: "all green" had come to mean "the last three bugs are still
+fixed". So three invariants are now asserted over the entire class rather than over one
+remembered repro:
+
+- **15 quoting contexts** (regex literals, JSX apostrophes, nested and multi-line
+  templates, CRLF, `/*` inside strings, Python docstrings) — a commented-out or quoted
+  import must never become an edge, and a real import beside it must always survive.
+- **9 Python manifest dialects** (PEP 621 inline and multi-line, optional extras,
+  poetry, Pipfile, setup.cfg, requirements) plus 3 local-package layouts including PEP
+  420 namespace packages — a declared dependency must never shadow a local file, and a
+  manifest must never destroy a real local edge.
+- **6 CommonMark fence styles** plus the unclosed-fence case — a documentation stamp
+  must never be parsed as a real section, and a real stamp must never be swallowed.
+
+Adding a dialect or a quoting context is one line in that file.
 
 Every assertion exists because that bug was real and shipped once. Among them:
 

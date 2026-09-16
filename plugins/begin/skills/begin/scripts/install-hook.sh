@@ -85,7 +85,9 @@ else
   # Extract the interpreter NAME. A `*sh` glob also matches csh, tcsh and fish,
   # none of which can run bash — appending to a csh pre-push hook made it exit
   # non-zero, which aborts every push.
-  INTERP="$(printf '%s' "$SHEBANG" | sed -e 's|^#![[:space:]]*||' -e 's|^[^[:space:]]*/env[[:space:]]\{1,\}||' -e 's|[[:space:]].*$||' -e 's|.*/||')"
+  INTERP="$(printf '%s' "$SHEBANG" | sed -e 's|^#![[:space:]]*||' -e 's|^[^[:space:]]*/env[[:space:]]\{1,\}||' -e 's|^-S[[:space:]]\{1,\}||' -e 's|[[:space:]].*$||' -e 's|.*/||')"
+  # `env -S bash -e` leaves "-S"; a hook with no shebang at all is /bin/sh.
+  case "$SHEBANG" in '#!'*) ;; *) INTERP=sh ;; esac
   case "$INTERP" in
     sh|bash|zsh|ksh|ksh93|dash|ash|mksh|'') ;;
     *)
